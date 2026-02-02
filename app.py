@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 
 # =========================
-# CONFIG
+# CONFIGURAÇÃO DA PÁGINA
 # =========================
 st.set_page_config(
     page_title="RDA THS - PETROBRAS | Dashboard Diário",
@@ -17,7 +17,8 @@ st.markdown(
       [data-testid="stMetricValue"] { font-size: 1.6rem; }
       .small-note { opacity: 0.78; font-size: 0.9rem; margin-top: -0.4rem; }
       .section-title { font-weight: 800; font-size: 1.05rem; margin: 0.25rem 0 0.75rem; }
-      .chip { display:inline-block; padding:0.15rem 0.55rem; border-radius:999px; font-size:0.85rem; background:#f2f4f7; }
+      .pill { display:inline-block; padding:0.15rem 0.55rem; border-radius:999px; font-size:0.85rem; background:#f2f4f7; }
+      .warn { background:#fff3cd; padding:0.5rem 0.75rem; border-radius:10px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -30,15 +31,16 @@ st.markdown(
 )
 
 # =========================
-# HELPERS
+# FUNÇÕES AUXILIARES
 # =========================
 REQUIRED_SHEETS = ["coletas", "entregas"]
 
 def norm_key(s: str) -> str:
-    """Normaliza chave: minúsculo + remove acentos básicos + espaços extras."""
+    """Normaliza chave para comparação (minúsculo + remove acentos básicos + espaços extras)."""
     if s is None:
         return ""
     s = str(s).strip().lower()
+    # remoção simples de acentos comuns pt-BR
     repl = str.maketrans({
         "á":"a","à":"a","â":"a","ã":"a",
         "é":"e","ê":"e",
@@ -54,8 +56,11 @@ def norm_key(s: str) -> str:
 
 def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     """Retorna o nome real da coluna no DF que corresponde a uma das opções (com normalização)."""
+    if df is None or df.empty:
+        return None
     cols = list(df.columns)
     norm_map = {norm_key(c): c for c in cols}
+
     for c in candidates:
         key = norm_key(c)
         if key in norm_map:
@@ -63,7 +68,10 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 def ensure_cols(df: pd.DataFrame, mapping: dict[str, list[str]], context: str) -> dict[str, str]:
-    """Resolve colunas obrigatórias e para execução se faltar algo."""
+    """
+    mapping: {col_canonica: [candidatos possíveis]}
+    retorna {col_canonica: nome_real_no_df}
+    """
     resolved = {}
     missing = []
     for canon, cands in mapping.items():
@@ -82,7 +90,8 @@ def ensure_cols(df: pd.DataFrame, mapping: dict[str, list[str]], context: str) -
 
 def read_excel(uploaded_file) -> tuple[pd.DataFrame, pd.DataFrame]:
     xls = pd.ExcelFile(uploaded_file)
-    sheet_map = {norm_key(n): n for n in xls.sheet_names}
+    sheet_names = xls.sheet_names
+    sheet_map = {norm_key(n): n for n in sheet_names}
 
     missing = [s for s in REQUIRED_SHEETS if norm_key(s) not in sheet_map]
     if missing:
@@ -137,17 +146,24 @@ def apply_date_filter(df: pd.DataFrame, dt_col: str, start, end, include_missing
     return df[mask]
 
 # =========================
-# UPLOAD
+# UPLOAD DO ARQUIVO
 # =========================
 uploaded = st.file_uploader("📤 Envie o Excel do dia (mesmo layout)", type=["xlsx"])
+
 if not uploaded:
     st.info("Envie o arquivo Excel para iniciar.")
     st.stop()
 
+# Verifica se é um novo arquivo (inicializa/reseta session state)
+if "uploaded_file_name" not in st.session_state or st.session_state["uploaded_file_name"] != uploaded.name:
+    st.session_state["uploaded_file_name"] = uploaded.name
+    st.session_state["master_coletas"] = None
+    st.session_state["master_entregas"] = None
+
 raw_coletas, raw_entregas = read_excel(uploaded)
 
 # =========================
-# RESOLVE COLS (robusto: com/sem acento)
+# MAPEAMENTO DE COLUNAS
 # =========================
 COLETAS_COLS = ensure_cols(
     raw_coletas,
@@ -183,32 +199,34 @@ ENTREGAS_COLS = ensure_cols(
 )
 
 # =========================
-# NORMALIZE DATAFRAMES
+# NORMALIZAÇÃO DOS DADOS
 # =========================
 def normalize_coletas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     dt = to_dt(df[COLETAS_COLS["DATA_COLETA"]])
     df["_DATA_COLETA_DT"] = dt
+
     exib = dt.dt.strftime("%Y-%m-%d")
     exib = exib.where(~dt.isna(), "Material não coletado")
     df["DATA DE COLETA"] = exib
 
     os_ = safe_str(df[COLETAS_COLS["OS"]])
     os_ = os_.where(~(os_.isna() | (os_.str.strip() == "")), "Sem número de OS")
-    df["OS_EXIB"] = os_
+    df["OS"] = os_
 
     out = pd.DataFrame({
         "CIDADE ORIGEM": df[COLETAS_COLS["CIDADE_ORIGEM"]],
         "CIDADE DESTINO": df[COLETAS_COLS["CIDADE_DESTINO"]],
         "DTM": df[COLETAS_COLS["DTM"]],
         "EMPRESA ORIGEM": df[COLETAS_COLS["EMPRESA_ORIGEM"]],
-        "OS": df["OS_EXIB"],
+        "OS": df["OS"],
         "DATA DE COLETA": df["DATA DE COLETA"],
         "NÍVEL DE SERVIÇO": df[COLETAS_COLS["NIVEL_SERVICO"]],
         "UF ORIGEM": df[COLETAS_COLS["UF_ORIGEM"]],
         "_DATA_COLETA_DT": df["_DATA_COLETA_DT"],
     })
+
     return out
 
 def normalize_entregas(df: pd.DataFrame) -> pd.DataFrame:
@@ -218,6 +236,8 @@ def normalize_entregas(df: pd.DataFrame) -> pd.DataFrame:
     df["_PREV_ENTREGA_DT"] = prev
 
     dt_ent = to_dt(df[ENTREGAS_COLS["DATA_ENTREGA"]])
+    df["_DATA_ENTREGA_DT"] = dt_ent
+    
     exib_ent = dt_ent.dt.strftime("%Y-%m-%d")
     exib_ent = exib_ent.where(~dt_ent.isna(), "Não entregue")
     df["DATA DE ENTREGA_EXIB"] = exib_ent
@@ -240,26 +260,81 @@ def normalize_entregas(df: pd.DataFrame) -> pd.DataFrame:
         "UF DESTINO": df[ENTREGAS_COLS["UF_DESTINO"]],
         "CIDADE DESTINO": df[ENTREGAS_COLS["CIDADE_DESTINO"]],
         "_PREV_ENTREGA_DT": df["_PREV_ENTREGA_DT"],
+        "_DATA_ENTREGA_DT": df["_DATA_ENTREGA_DT"],
     })
+
     return out
 
 coletas = normalize_coletas(raw_coletas)
 entregas = normalize_entregas(raw_entregas)
 
+# Inicializa master dataframes com IDs únicos e coluna de observações
+if st.session_state["master_coletas"] is None:
+    coletas["_ID"] = range(len(coletas))
+    coletas["OBSERVAÇÕES"] = ""
+    st.session_state["master_coletas"] = coletas.copy()
+else:
+    coletas = st.session_state["master_coletas"].copy()
+
+if st.session_state["master_entregas"] is None:
+    entregas["_ID"] = range(len(entregas))
+    entregas["OBSERVAÇÕES"] = ""
+    st.session_state["master_entregas"] = entregas.copy()
+else:
+    entregas = st.session_state["master_entregas"].copy()
+
 # =========================
-# OVERVIEW
+# RESUMO DO ARQUIVO
 # =========================
 with st.expander("📌 Resumo do arquivo carregado", expanded=False):
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Linhas (Coletas)", len(coletas))
     c2.metric("Linhas (Entregas)", len(entregas))
-    c3.metric("DTMs únicas (Coletas)", coletas["DTM"].nunique(dropna=True))
-    c4.metric("DTMs únicas (Entregas)", entregas["DTM"].nunique(dropna=True))
+    c3.metric("DTMs únicas (total)", pd.concat([coletas["DTM"], entregas["DTM"]]).nunique(dropna=True))
+
+# =========================
+# CALLBACKS PARA ATUALIZAR OBSERVAÇÕES
+# =========================
+def update_coletas():
+    """Atualiza as observações no master dataframe de coletas."""
+    if "editor_coletas" in st.session_state:
+        edited_data = st.session_state["editor_coletas"]
+        if "edited_rows" in edited_data and edited_data["edited_rows"]:
+            # Verifica se temos a visualização anterior
+            if "view_coletas" in st.session_state:
+                view_df = st.session_state["view_coletas"]
+                master = st.session_state["master_coletas"]
+                
+                # Atualiza cada linha editada
+                for row_idx, changes in edited_data["edited_rows"].items():
+                    if "OBSERVAÇÕES" in changes and row_idx < len(view_df):
+                        # Pega o ID original da linha
+                        original_id = view_df.iloc[row_idx]["_ID"]
+                        # Atualiza no master dataframe
+                        master.loc[master["_ID"] == original_id, "OBSERVAÇÕES"] = changes["OBSERVAÇÕES"]
+
+def update_entregas():
+    """Atualiza as observações no master dataframe de entregas."""
+    if "editor_entregas" in st.session_state:
+        edited_data = st.session_state["editor_entregas"]
+        if "edited_rows" in edited_data and edited_data["edited_rows"]:
+            # Verifica se temos a visualização anterior
+            if "view_entregas" in st.session_state:
+                view_df = st.session_state["view_entregas"]
+                master = st.session_state["master_entregas"]
+                
+                # Atualiza cada linha editada
+                for row_idx, changes in edited_data["edited_rows"].items():
+                    if "OBSERVAÇÕES" in changes and row_idx < len(view_df):
+                        # Pega o ID original da linha
+                        original_id = view_df.iloc[row_idx]["_ID"]
+                        # Atualiza no master dataframe
+                        master.loc[master["_ID"] == original_id, "OBSERVAÇÕES"] = changes["OBSERVAÇÕES"]
 
 tabs = st.tabs(["🚚 Coletas", "📦 Entregas"])
 
 # =========================
-# TAB: COLETAS
+# ABA COLETAS
 # =========================
 with tabs[0]:
     st.markdown("<div class='section-title'>Filtros — Coletas</div>", unsafe_allow_html=True)
@@ -288,9 +363,9 @@ with tabs[0]:
     if cid_sel != "(Todas)":
         tmp = tmp[tmp["CIDADE ORIGEM"] == cid_sel]
 
-    # 5) OS (status)
+    # 5) OS (status) - NOVO FILTRO
     os_status = st.selectbox(
-        "OS (status)",
+        "OS (status)", 
         options=["(Todas)", "Sem número de OS", "Com número de OS"],
         key="coletas_os_status"
     )
@@ -306,12 +381,42 @@ with tabs[0]:
     k3.metric("Sem OS", int((tmp["OS"] == "Sem número de OS").sum()))
     k4.metric("Material não coletado", int((tmp["DATA DE COLETA"] == "Material não coletado").sum()))
 
-    # Tabela final
+    # Tabela final (somente campos solicitados) com coluna editável
     view_cols = ["CIDADE ORIGEM", "CIDADE DESTINO", "DTM", "EMPRESA ORIGEM", "OS", "DATA DE COLETA"]
-    st.dataframe(tmp[view_cols].reset_index(drop=True), use_container_width=True, height=560)
+    display_df = tmp[view_cols + ["_ID", "OBSERVAÇÕES"]].copy().reset_index(drop=True)
+    
+    # Salva a visualização atual para o callback
+    st.session_state["view_coletas"] = display_df.copy()
+    
+    # Prepara DataFrame para exibição (remove _ID)
+    display_for_editor = display_df.drop(columns=["_ID"])
+    
+    # Editor de dados interativo com callback
+    edited_coletas = st.data_editor(
+        display_for_editor,
+        use_container_width=True,
+        height=560,
+        disabled=view_cols,  # Apenas OBSERVAÇÕES pode ser editada
+        key="editor_coletas",
+        on_change=update_coletas
+    )
+    
+    # Botão de download
+    import io
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        edited_coletas.to_excel(writer, sheet_name='Coletas', index=False)
+    
+    st.download_button(
+        label="📥 Exportar Coletas (Excel)",
+        data=output.getvalue(),
+        file_name=f"coletas_exportadas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_coletas"
+    )
 
 # =========================
-# TAB: ENTREGAS
+# ABA ENTREGAS
 # =========================
 with tabs[1]:
     st.markdown("<div class='section-title'>Filtros — Entregas</div>", unsafe_allow_html=True)
@@ -320,7 +425,7 @@ with tabs[1]:
     start, end, include_missing = date_filter_ui("PREVISÃO DE ENTREGA", entregas["_PREV_ENTREGA_DT"])
     tmp = apply_date_filter(entregas, "_PREV_ENTREGA_DT", start, end, include_missing)
 
-    # 2) NÍVEL DE SERVIÇO (igual coletas)
+    # 2) NÍVEL DE SERVIÇO - NOVO FILTRO
     ns_opts = sorted([x for x in tmp["NÍVEL DE SERVIÇO"].dropna().unique()])
     ns_sel = st.multiselect("NÍVEL DE SERVIÇO", options=ns_opts, default=ns_opts, key="entregas_ns")
     if ns_sel:
@@ -340,15 +445,15 @@ with tabs[1]:
     if cid_sel != "(Todas)":
         tmp = tmp[tmp["CIDADE DESTINO"] == cid_sel]
 
-    # 5) DATA DE ENTREGA (status)
-    entrega_status = st.selectbox(
-        "DATA DE ENTREGA (status)",
+    # 5) DATA DE ENTREGA (status) - NOVO FILTRO
+    ent_status = st.selectbox(
+        "DATA DE ENTREGA (status)", 
         options=["(Todas)", "Não entregue", "Entregue"],
-        key="entregas_data_entrega_status"
+        key="entregas_ent_status"
     )
-    if entrega_status == "Não entregue":
+    if ent_status == "Não entregue":
         tmp = tmp[tmp["DATA DE ENTREGA"] == "Não entregue"]
-    elif entrega_status == "Entregue":
+    elif ent_status == "Entregue":
         tmp = tmp[tmp["DATA DE ENTREGA"] != "Não entregue"]
 
     # KPIs
@@ -358,6 +463,36 @@ with tabs[1]:
     k3.metric("Não entregue", int((tmp["DATA DE ENTREGA"] == "Não entregue").sum()))
     k4.metric("Níveis de serviço", tmp["NÍVEL DE SERVIÇO"].nunique(dropna=True))
 
-    # Tabela final
+    # Tabela final (somente campos solicitados) com coluna editável
     view_cols = ["ORIGEM → DESTINO", "DTM", "NÍVEL DE SERVIÇO", "EMPRESA DESTINO", "DATA DE ENTREGA", "EMBARQUE", "CTE"]
-    st.dataframe(tmp[view_cols].reset_index(drop=True), use_container_width=True, height=560)
+    display_df = tmp[view_cols + ["_ID", "OBSERVAÇÕES"]].copy().reset_index(drop=True)
+    
+    # Salva a visualização atual para o callback
+    st.session_state["view_entregas"] = display_df.copy()
+    
+    # Prepara DataFrame para exibição (remove _ID)
+    display_for_editor = display_df.drop(columns=["_ID"])
+    
+    # Editor de dados interativo com callback
+    edited_entregas = st.data_editor(
+        display_for_editor,
+        use_container_width=True,
+        height=560,
+        disabled=view_cols,  # Apenas OBSERVAÇÕES pode ser editada
+        key="editor_entregas",
+        on_change=update_entregas
+    )
+    
+    # Botão de download
+    import io
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        edited_entregas.to_excel(writer, sheet_name='Entregas', index=False)
+    
+    st.download_button(
+        label="📥 Exportar Entregas (Excel)",
+        data=output.getvalue(),
+        file_name=f"entregas_exportadas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_entregas"
+    )

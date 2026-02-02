@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Arquivos Excel de teste (não commitar dados sensíveis)
+*.xlsx
+*.xls
+
+# Arquivos temporários do Streamlit
+.streamlit/secrets.toml
+
+# Arquivos do sistema
+Thumbs.db
+desktop.ini
